@@ -1,110 +1,77 @@
-
-"""SWYNEX Data Cleaning and Preparation Project"""
-
 import pandas as pd
-import numpy as np
 
-# 1. Load original dataset
-raw = pd.read_csv("retail_store_sales.csv")
+INPUT_FILE = "retail_store_sales.csv"
+OUTPUT_FILE = "SWYNEX-cleaned-retail-sales.csv"
 
-print("Original rows:", len(raw))
+df = pd.read_csv(INPUT_FILE)
+original_rows = len(df)
 
-# 2. Clean text columns
-text_columns = raw.select_dtypes(include="object").columns
+# Clean whitespace in text columns.
+for column in df.select_dtypes(include="object").columns:
+    df[column] = df[column].astype("string").str.strip()
+    df[column] = df[column].replace("", pd.NA)
 
-for column in text_columns:
-    raw[column] = raw[column].apply(
-        lambda value: value.strip() if isinstance(value, str) else value
-    )
+# Remove exact duplicate rows.
+exact_duplicates = int(df.duplicated().sum())
+df = df.drop_duplicates().copy()
+duplicate_transaction_ids = int(df["Transaction ID"].duplicated().sum())
 
-# 3. Remove exact duplicate records
-full_duplicates = int(raw.duplicated().sum())
-raw = raw.drop_duplicates().copy()
-
-# Check duplicate transaction IDs separately
-duplicate_transactions = int(
-    raw["Transaction ID"].duplicated().sum()
-)
-
-# 4. Convert numeric columns to correct data types
-numeric_columns = [
-    "Price Per Unit",
-    "Quantity",
-    "Total Spent"
-]
-
-numeric_errors = {}
-
+# Convert numeric columns safely.
+numeric_columns = ["Price Per Unit", "Quantity", "Total Spent"]
+conversion_errors = {}
 for column in numeric_columns:
-    converted = pd.to_numeric(raw[column], errors="coerce")
-    numeric_errors[column] = int(
-        (raw[column].notna() & converted.isna()).sum()
-    )
-    raw[column] = converted
+    before = df[column].notna()
+    converted = pd.to_numeric(df[column], errors="coerce")
+    conversion_errors[column] = int((before & converted.isna()).sum())
+    df[column] = converted
 
-# 5. Handle missing categorical values
-missing_items = int(raw["Item"].isna().sum())
-missing_discounts = int(raw["Discount Applied"].isna().sum())
+# Replace missing category labels with an explicit value.
+missing_item_filled = int(df["Item"].isna().sum())
+df["Item"] = df["Item"].fillna("Unknown")
 
-raw["Item"] = raw["Item"].fillna("Unknown")
-raw["Discount Applied"] = raw["Discount Applied"].fillna("Unknown")
+missing_discount_filled = int(df["Discount Applied"].isna().sum())
+df["Discount Applied"] = df["Discount Applied"].fillna("Unknown")
 
-# 6. Calculate missing unit prices where possible
-price_mask = (
-    raw["Price Per Unit"].isna()
-    & raw["Quantity"].notna()
-    & raw["Total Spent"].notna()
-    & (raw["Quantity"] > 0)
+# Infer unit price only when total and a positive quantity are available.
+price_missing_before = int(df["Price Per Unit"].isna().sum())
+price_fill_mask = (
+    df["Price Per Unit"].isna()
+    & df["Total Spent"].notna()
+    & df["Quantity"].notna()
+    & (df["Quantity"] > 0)
 )
-
-raw.loc[price_mask, "Price Per Unit"] = (
-    raw.loc[price_mask, "Total Spent"]
-    / raw.loc[price_mask, "Quantity"]
-).round(2)
-
-# 7. Validate Total Spent = Price Per Unit x Quantity
-valid_rows = raw[
-    ["Price Per Unit", "Quantity", "Total Spent"]
-].notna().all(axis=1)
-
-expected_total = (
-    raw.loc[valid_rows, "Price Per Unit"]
-    * raw.loc[valid_rows, "Quantity"]
+df.loc[price_fill_mask, "Price Per Unit"] = (
+    df.loc[price_fill_mask, "Total Spent"] / df.loc[price_fill_mask, "Quantity"]
 )
+prices_calculated = int(price_fill_mask.sum())
 
-actual_total = raw.loc[valid_rows, "Total Spent"]
+# Standardize transaction dates.
+parsed_dates = pd.to_datetime(df["Transaction Date"], errors="coerce")
+invalid_dates = int((df["Transaction Date"].notna() & parsed_dates.isna()).sum())
+df["Transaction Date"] = parsed_dates.dt.strftime("%Y-%m-%d")
 
+# Check the total against unit price multiplied by quantity where all values exist.
+complete_amount_rows = df[["Price Per Unit", "Quantity", "Total Spent"]].notna().all(axis=1)
+valid_amount_rows = complete_amount_rows & (df["Quantity"] > 0)
 mismatch_count = int(
-    (~np.isclose(actual_total, expected_total, atol=0.01)).sum()
+    (
+        (df.loc[valid_amount_rows, "Price Per Unit"] * df.loc[valid_amount_rows, "Quantity"]
+         - df.loc[valid_amount_rows, "Total Spent"]).abs() > 0.01
+    ).sum()
 )
 
-# 8. Standardise transaction dates
-dates = pd.to_datetime(
-    raw["Transaction Date"],
-    errors="coerce",
-    dayfirst=False
-)
+df.to_csv(OUTPUT_FILE, index=False)
 
-invalid_dates = int(
-    (raw["Transaction Date"].notna() & dates.isna()).sum()
-)
-
-raw["Transaction Date"] = dates.dt.strftime("%Y-%m-%d")
-
-# 9. Save cleaned dataset
-raw.to_csv("SWYNEX-cleaned-retail-sales.csv", index=False)
-
-# 10. Display cleaning report
-print("\n--- SWYNEX CLEANING REPORT ---")
-print("Rows retained:", len(raw))
-print("Exact duplicate rows removed:", full_duplicates)
-print("Duplicate transaction IDs:", duplicate_transactions)
-print("Missing Item values replaced:", missing_items)
-print("Missing Discount values replaced:", missing_discounts)
-print("Unit prices calculated:", int(price_mask.sum()))
-print("Invalid transaction dates:", invalid_dates)
-print("Numeric conversion errors:", numeric_errors)
-print("Numeric mismatches:", mismatch_count)
-print("\nRemaining missing values:")
-print(raw.isna().sum())
-print("\nCleaning completed successfully!")
+print("CLEANING REPORT")
+print(f"Original rows: {original_rows}")
+print(f"Cleaned rows: {len(df)}")
+print(f"Exact duplicate rows removed: {exact_duplicates}")
+print(f"Duplicate Transaction IDs: {duplicate_transaction_ids}")
+print(f"Missing Item values filled: {missing_item_filled}")
+print(f"Missing Discount Applied values filled: {missing_discount_filled}")
+print(f"Price Per Unit values calculated: {prices_calculated}")
+print(f"Invalid transaction dates: {invalid_dates}")
+print(f"Numeric conversion errors: {sum(conversion_errors.values())}")
+print(f"Amount mismatches (complete rows): {mismatch_count}")
+print(f"Rows with Quantity still missing: {int(df['Quantity'].isna().sum())}")
+print(f"Rows with Total Spent still missing: {int(df['Total Spent'].isna().sum())}")
